@@ -134,7 +134,7 @@ int main() {
                 result = "No numbers matching the condition found";
             }
 
-// Отправка результата клиенту
+            // Отправка результата клиенту
             send(clientSocket, result.c_str(), result.length(), 0); // НЕ +1 — клиент может ждать точное кол-во байт
             cout << "Sent to client: " << result << endl << endl;
         }
