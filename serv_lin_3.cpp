@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <iostream>
 #include <string>
 #include <vector>
@@ -9,107 +8,116 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/select.h>
-#include <signal.h>
+#include <ifaddrs.h>
+#include <algorithm>
+#include <cstdio> // <-- для snprintf
 
 using namespace std;
 
-// Глобальный мьютекс для защиты списка клиентов
 mutex clients_mutex;
-vector<int> clients; // SOCKET -> int
 
-// Функция обработки клиента
-void ClientHandler(int client_fd, struct sockaddr_in client_addr) {
-    // Добавляем клиента в список
+void printServerIPs() {
+    cout << "=== Server IP Addresses ===" << endl;
+    struct ifaddrs *ifaddrs_ptr, *ifa;
+    if (getifaddrs(&ifaddrs_ptr) == -1) {
+        perror("getifaddrs");
+        return;
+    }
+
+    for (ifa = ifaddrs_ptr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr, ip_str, INET_ADDRSTRLEN);
+            cout << "Interface: " << ifa->ifa_name << " → IPv4: " << ip_str << endl;
+        }
+    }
+    freeifaddrs(ifaddrs_ptr);
+    cout << "============================" << endl << endl;
+}
+
+void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& allClients) {
     {
         lock_guard<mutex> lock(clients_mutex);
-        clients.push_back(client_fd);
+        allClients.push_back(client_fd);
     }
 
     char username[20] = {0};
     char recv_buffer[1024] = {0};
     char send_buffer[1024] = {0};
 
-    // Получаем имя пользователя
-    if (recv(client_fd, username, sizeof(username) - 1, 0) <= 0) {
-        // Ошибка при получении имени — удаляем клиента
+    ssize_t bytes = recv(client_fd, username, sizeof(username) - 1, 0);
+    if (bytes <= 0) {
         lock_guard<mutex> lock(clients_mutex);
-        clients.erase(remove(clients.begin(), clients.end(), client_fd), clients.end());
+        allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
         close(client_fd);
         return;
     }
-    username[sizeof(username) - 1] = '\0';
+    username[bytes] = '\0';
 
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     int client_port = ntohs(client_addr.sin_port);
 
-    // Формируем сообщение о подключении
-    snprintf(send_buffer, sizeof(send_buffer), "Connect %s, ip: %s:%d\n", username, client_ip, client_port);
+    // ✅ Безопасный snprintf: ограничиваем длину username до 19 символов
+    snprintf(send_buffer, sizeof(send_buffer), "Connect %.19s, ip: %s:%d\n", username, client_ip, client_port);
     cout << send_buffer;
 
-    // Рассылаем всем, кроме себя
     {
         lock_guard<mutex> lock(clients_mutex);
-        for (int fd : clients) {
+        for (int fd : allClients) {
             if (fd != client_fd) {
                 send(fd, send_buffer, strlen(send_buffer), 0);
             }
         }
     }
 
-    // Основной цикл обмена сообщениями
     while (true) {
         memset(recv_buffer, 0, sizeof(recv_buffer));
-        ssize_t bytes_received = recv(client_fd, recv_buffer, sizeof(recv_buffer) - 1, 0);
+        ssize_t received = recv(client_fd, recv_buffer, sizeof(recv_buffer) - 1, 0);
 
-        if (bytes_received <= 0) {
-            // Клиент отключился или ошибка
-            cout << "Disconnect " << username << ", ip " << client_ip << endl;
+        if (received <= 0) {
+            cout << "Client disconnected: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %.19s\n", username);
 
-            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
-
-            // Удаляем клиента и рассылаем сообщение
             {
                 lock_guard<mutex> lock(clients_mutex);
-                // Рассылка
-                for (int fd : clients) {
+                for (int fd : allClients) {
                     if (fd != client_fd) {
                         send(fd, send_buffer, strlen(send_buffer), 0);
                     }
                 }
-                // Удаление
-                clients.erase(remove(clients.begin(), clients.end(), client_fd), clients.end());
+                allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
             }
             break;
         }
 
-        recv_buffer[bytes_received] = '\0';
-        // Удаляем возможные \r\n в конце (если клиент Windows)
-        recv_buffer[strcspn(recv_buffer, "\r\n")] = 0;
+        recv_buffer[received] = '\0';
+        recv_buffer[strcspn(recv_buffer, "\r\n")] = '\0';
 
         if (strcmp(recv_buffer, "/exit") == 0) {
-            cout << "Disconnect " << username << ", ip " << client_ip << endl;
-            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
+            cout << "Client requested exit: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %.19s\n", username);
 
             {
                 lock_guard<mutex> lock(clients_mutex);
-                for (int fd : clients) {
+                for (int fd : allClients) {
                     if (fd != client_fd) {
                         send(fd, send_buffer, strlen(send_buffer), 0);
                     }
                 }
-                clients.erase(remove(clients.begin(), clients.end(), client_fd), clients.end());
+                allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
             }
             break;
         }
 
-        cout << username << ": " << recv_buffer << endl;
-        snprintf(send_buffer, sizeof(send_buffer), "%s: %s\n", username, recv_buffer);
+        cout << username << " (" << client_ip << ":" << client_port << "): " << recv_buffer << endl;
+        // ✅ Безопасный snprintf: ограничиваем обе строки
+        snprintf(send_buffer, sizeof(send_buffer), "%.19s: %.1000s\n", username, recv_buffer);
 
         {
             lock_guard<mutex> lock(clients_mutex);
-            for (int fd : clients) {
+            for (int fd : allClients) {
                 if (fd != client_fd) {
                     send(fd, send_buffer, strlen(send_buffer), 0);
                 }
@@ -120,26 +128,15 @@ void ClientHandler(int client_fd, struct sockaddr_in client_addr) {
     close(client_fd);
 }
 
-// Обработчик SIGINT (Ctrl+C) для корректного завершения
-void signal_handler(int sig) {
-    cout << "\nShutting down server..." << endl;
-
-    {
-        lock_guard<mutex> lock(clients_mutex);
-        for (int fd : clients) {
-            close(fd);
-        }
-        clients.clear();
-    }
-
-    exit(0);
-}
-
 int main() {
-    const int PORT = 2009;
+    printServerIPs();
 
-    // Настройка обработчика сигнала
-    signal(SIGINT, signal_handler);
+    int port;
+    cout << "Enter server port (1–65535): ";
+    if (!(cin >> port) || port < 1 || port > 65535) {
+        cerr << "Invalid port number!" << endl;
+        return 1;
+    }
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -149,15 +146,15 @@ int main() {
 
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
-        perror("setsockopt");
+        perror("setsockopt SO_REUSEADDR");
         close(server_fd);
         return 1;
     }
 
     struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY; // ✅ INADDR_ANY уже в сетевом порядке
+    server_addr.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
         perror("Bind failed");
@@ -171,8 +168,10 @@ int main() {
         return 1;
     }
 
-    cout << "Server started on port " << PORT << endl;
-    cout << "Waiting for connections..." << endl;
+    cout << "\nServer started successfully on port " << port << endl;
+    cout << "Waiting for connections..." << endl << endl;
+
+    vector<int> clients;
 
     while (true) {
         struct sockaddr_in client_addr;
@@ -186,10 +185,10 @@ int main() {
 
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
-        cout << "Client connected: " << ip_str << ":" << ntohs(client_addr.sin_port) << endl << endl;
+        int client_port = ntohs(client_addr.sin_port);
+        cout << "New client connected: " << ip_str << ":" << client_port << endl << endl;
 
-        // Запускаем обработчик в отдельном потоке
-        thread t(ClientHandler, client_fd, client_addr);
+        thread t(ServerThread, client_fd, client_addr, ref(clients));
         t.detach();
     }
 
