@@ -111,8 +111,6 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
             break;
         }
 
-        cout << username << " (" << client_ip << ":" << client_port << "): " << recv_buffer << endl;
-        // ✅ Безопасный snprintf: ограничиваем обе строки
         snprintf(send_buffer, sizeof(send_buffer), "%.19s: %.1000s\n", username, recv_buffer);
 
         {
