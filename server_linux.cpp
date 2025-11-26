@@ -5,181 +5,205 @@
 #include <mutex>
 #include <cstring>
 #include <unistd.h>
-#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <cstdlib>
 
 using namespace std;
 
 // Глобальный мьютекс для защиты списка клиентов
 mutex clients_mutex;
+vector<int> clients;
 
-int ServerThread(int Client, sockaddr_in ClientAddr, vector<int>& allClients)
-{
-    // Добавляем клиента в список с защитой мьютексом
-    {
-        lock_guard<mutex> lock(clients_mutex);
-        allClients.push_back(Client);
+// === Вспомогательная функция: вывод всех IPv4-адресов сервера ===
+void printServerIPs() {
+    cout << "=== Server IP Addresses ===" << endl;
+    struct ifaddrs *ifaddrs_ptr, *ifa;
+    if (getifaddrs(&ifaddrs_ptr) == -1) {
+        perror("getifaddrs");
+        return;
     }
-    
-    int ErrorStatus, MaxLength = 1024;
-    char UserName[20];
-    char* RecvBuffer = new char[MaxLength];  // Буфер для приема данных
-    char* SendBuffer = new char[MaxLength];  // Буфер для отправки данных
-    char ip[INET_ADDRSTRLEN];
-    bool flag = true;
 
-    inet_ntop(AF_INET, &(ClientAddr.sin_addr), ip, INET_ADDRSTRLEN); // Запись IP
-    unsigned short port = ntohs(ClientAddr.sin_port); // Запись порта
-
-    recv(Client, UserName, 20, 0);
-    snprintf(SendBuffer, MaxLength, "Connect %s, ip: %s:%d\n", UserName, ip, port); // Вывод информации всем подключенным пользователям
-    printf("%s", SendBuffer); // Вывод информации на сервер
-
-    // Рассылка сообщения о подключении с защитой мьютексом
-    {
-        lock_guard<mutex> lock(clients_mutex);
-        for (size_t i = 0; i < allClients.size(); i++)
-            if (allClients[i] != Client)
-                send(allClients[i], SendBuffer, strlen(SendBuffer), 0);
-    }
-    
-    memset(SendBuffer, 0, MaxLength);
-
-    while (flag)
-    {
-        memset(RecvBuffer, 0, MaxLength);
-        memset(SendBuffer, 0, MaxLength);
-        ErrorStatus = recv(Client, RecvBuffer, MaxLength, 0);
-        
-        if (ErrorStatus > 0)
-        {
-            RecvBuffer[ErrorStatus] = 0;
-            if (strcmp(RecvBuffer, "/exit") == 0) // Проверка на попытку отключения
-            {
-                printf("Disconnect %s , ip %s\n", UserName, ip);
-                snprintf(SendBuffer, MaxLength, "Disconnect %s\n", UserName);
-                
-                // Удаление клиента и рассылка с защитой мьютексом
-                {
-                    lock_guard<mutex> lock(clients_mutex);
-                    for (size_t i = 0; i < allClients.size(); i++)
-                    {
-                        if (allClients.at(i) != Client)
-                            send(allClients[i], SendBuffer, strlen(SendBuffer), 0);
-                        else
-                        {
-                            allClients.erase(allClients.begin() + i);
-                            i--; // Корректируем индекс после удаления
-                        }
-                    }
-                }
-                break;
-            }
-
-            printf("%s: %s\n", UserName, RecvBuffer);
-            snprintf(SendBuffer, MaxLength, "%s: %s\n", UserName, RecvBuffer);
-
-            // Рассылка сообщения всем клиентам с защитой мьютексом
-            {
-                lock_guard<mutex> lock(clients_mutex);
-                for (size_t i = 0; i < allClients.size(); i++)
-                    send(allClients[i], SendBuffer, strlen(SendBuffer), 0);
-            }
-        }
-        else
-        {
-            printf("Error %s. Connection closed\n", ip);
-            
-            // Удаление клиента при ошибке с защитой мьютексом
-            {
-                lock_guard<mutex> lock(clients_mutex);
-                for (size_t i = 0; i < allClients.size(); i++)
-                    if (allClients[i] == Client)
-                    {
-                        allClients.erase(allClients.begin() + i);
-                        break;
-                    }
-            }
-            
-            close(Client);
-            delete[] SendBuffer;
-            delete[] RecvBuffer;
-            return 1;
+    for (ifa = ifaddrs_ptr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            char ip_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr, ip_str, INET_ADDRSTRLEN);
+            cout << "Interface: " << ifa->ifa_name << " → IPv4: " << ip_str << endl;
         }
     }
-
-    // Освобождение ресурсов при нормальном завершении
-    close(Client);
-    delete[] SendBuffer;
-    delete[] RecvBuffer;
-    return 0;
+    freeifaddrs(ifaddrs_ptr);
+    cout << "============================" << endl << endl;
 }
 
-int main()
-{
-    setlocale(LC_ALL, "ru_RU.UTF-8");
-    
-    int ClientSocket;
-    sockaddr_in ServerAddr;
-    int ErrorStatus, MaxLength = 1024;
-    unsigned short port = 2009;
-
-    int ServerSocket = socket(AF_INET, SOCK_STREAM, 0);
-
-    if (ServerSocket == -1) {
-        cout << "Socket creation failed" << endl;
-        return 1;
-    }
-
-    // Установка опции для повторного использования адреса
-    int opt = 1;
-    if (setsockopt(ServerSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        cout << "Setsockopt failed" << endl;
-        close(ServerSocket);
-        return 1;
-    }
-
-    // Установка адресной информации для сокета
-    ServerAddr.sin_addr.s_addr = INADDR_ANY; // Регистрирование сервера на всех адресах машины, на которой он запущен
-    ServerAddr.sin_family = AF_INET; // Семейство
-    ServerAddr.sin_port = htons(port); // Порт
-
-    if (bind(ServerSocket, (sockaddr*)&ServerAddr, sizeof(ServerAddr)) == -1)
+// === Обработчик клиента ===
+void ClientHandler(int client_fd, struct sockaddr_in client_addr, vector<int>& allClients) {
     {
-        cout << "Bind failed" << endl;
-        close(ServerSocket);
+        lock_guard<mutex> lock(clients_mutex);
+        allClients.push_back(client_fd);
+    }
+
+    char username[20] = {0};
+    char recv_buffer[1024];
+    char send_buffer[1024];
+
+    // Получаем имя пользователя
+    ssize_t bytes = recv(client_fd, username, sizeof(username) - 1, 0);
+    if (bytes <= 0) {
+        // Не удалось получить имя — удаляем клиента
+        lock_guard<mutex> lock(clients_mutex);
+        allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+        close(client_fd);
+        return;
+    }
+    username[bytes] = '\0';
+
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+    int client_port = ntohs(client_addr.sin_port);
+
+    // Сообщение о подключении
+    snprintf(send_buffer, sizeof(send_buffer), "Connect %s, ip: %s:%d\n", username, client_ip, client_port);
+    cout << send_buffer;
+
+    // Рассылка остальным
+    {
+        lock_guard<mutex> lock(clients_mutex);
+        for (int fd : allClients) {
+            if (fd != client_fd) {
+                send(fd, send_buffer, strlen(send_buffer), 0);
+            }
+        }
+    }
+
+    // Основной цикл
+    while (true) {
+        memset(recv_buffer, 0, sizeof(recv_buffer));
+        ssize_t received = recv(client_fd, recv_buffer, sizeof(recv_buffer) - 1, 0);
+
+        if (received <= 0) {
+            // Клиент отключился
+            cout << "Client disconnected: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
+
+            {
+                lock_guard<mutex> lock(clients_mutex);
+                for (int fd : allClients) {
+                    if (fd != client_fd) {
+                        send(fd, send_buffer, strlen(send_buffer), 0);
+                    }
+                }
+                allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+            }
+            break;
+        }
+
+        recv_buffer[received] = '\0';
+        // Удаляем символы новой строки, если есть
+        recv_buffer[strcspn(recv_buffer, "\r\n")] = '\0';
+
+        if (strcmp(recv_buffer, "/exit") == 0) {
+            cout << "Client requested exit: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
+
+            {
+                lock_guard<mutex> lock(clients_mutex);
+                for (int fd : allClients) {
+                    if (fd != client_fd) {
+                        send(fd, send_buffer, strlen(send_buffer), 0);
+                    }
+                }
+                allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+            }
+            break;
+        }
+
+        cout << username << " (" << client_ip << ":" << client_port << "): " << recv_buffer << endl;
+        snprintf(send_buffer, sizeof(send_buffer), "%s: %s\n", username, recv_buffer);
+
+        {
+            lock_guard<mutex> lock(clients_mutex);
+            for (int fd : allClients) {
+                if (fd != client_fd) {
+                    send(fd, send_buffer, strlen(send_buffer), 0);
+                }
+            }
+        }
+    }
+
+    close(client_fd);
+}
+
+// === Главная функция ===
+int main() {
+    // Вывод IP-адресов сервера
+    printServerIPs();
+
+    // Ввод порта с клавиатуры
+    int port;
+    cout << "Enter server port (1–65535): ";
+    if (!(cin >> port) || port < 1 || port > 65535) {
+        cerr << "Invalid port number!" << endl;
         return 1;
     }
 
-    if (listen(ServerSocket, 50) == -1) {
-        cout << "Listen failed" << endl;
-        close(ServerSocket);
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1) {
+        perror("Socket creation failed");
         return 1;
     }
 
-    cout << "Server started on port " << port << endl;
-    cout << "Waiting for connections..." << endl;
+    // Повторное использование адреса
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        perror("setsockopt SO_REUSEADDR");
+        close(server_fd);
+        return 1;
+    }
 
-    vector<int> clients;
+    struct sockaddr_in server_addr = {0};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;  // Слушать на всех интерфейсах (локальная, глобальная, loopback)
+    server_addr.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        perror("Bind failed");
+        close(server_fd);
+        return 1;
+    }
+
+    if (listen(server_fd, 50) == -1) {
+        perror("Listen failed");
+        close(server_fd);
+        return 1;
+    }
+
+    cout << "\n✅ Server started successfully on port " << port << endl;
+    cout << "Waiting for connections..." << endl << endl;
 
     while (true) {
-        sockaddr_in ClientAddr;
-        socklen_t ClientAddrSize = sizeof(ClientAddr);
-        int ClientSocket = accept(ServerSocket, (struct sockaddr*)&ClientAddr, &ClientAddrSize);
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
 
-        if (ClientSocket == -1)
-        {
-            cout << "Accept failed" << endl;
+        if (client_fd == -1) {
+            perror("Accept failed");
             continue;
         }
 
-        cout << "Client connected: " << inet_ntoa(ClientAddr.sin_addr) << ":" << ntohs(ClientAddr.sin_port) << endl << endl;
+        // Вывод информации о клиенте
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
+        int client_port = ntohs(client_addr.sin_port);
+        cout << "🆕 New client connected: " << ip_str << ":" << client_port << endl << endl;
 
-        thread t(ServerThread, ClientSocket, ClientAddr, std::ref(clients));
-        t.detach(); // Отсоединяет связанный поток от объекта thread
+        // Запуск обработчика в отдельном потоке
+        thread(ClientHandler, client_fd, client_addr, ref(clients)).detach();
     }
 
-    close(ServerSocket);
+    close(server_fd);
     return 0;
 }
