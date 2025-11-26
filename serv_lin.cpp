@@ -77,15 +77,28 @@ string processNumbers(const string &input) {
     return result;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     // Вывод IP-адресов сервера
     printServerIPs();
 
-    // Ввод порта с клавиатуры
+    // Проверка аргументов командной строки
+    if (argc != 2) {
+        cerr << "Usage: " << argv[0] << " <port>" << endl;
+        return 1;
+    }
+
     int port;
-    cout << "Enter server port: ";
-    cin >> port;
-    cin.ignore(); // Очистка буфера
+    try {
+        port = stoi(argv[1]);
+    } catch (const exception&) {
+        cerr << "Error: Port must be a valid integer." << endl;
+        return 1;
+    }
+
+    if (port < 1 || port > 65535) {
+        cerr << "Error: Port must be between 1 and 65535." << endl;
+        return 1;
+    }
 
     // Создание сокета
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -96,25 +109,29 @@ int main() {
 
     // Опция для повторного использования порта
     int opt = 1;
-    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
+        perror("setsockopt SO_REUSEADDR failed");
+        close(serverSocket);
+        return 1;
+    }
 
     // Настройка адреса сервера
     sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serverAddr.sin_addr.s_addr = htonl(INADDR_ANY); // Слушать на всех интерфейсах
     serverAddr.sin_port = htons(port);
 
     // Связывание сокета с адресом
     if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == -1) {
-        cerr << "Bind failed on port " << port << endl;
+        perror("Bind failed");
         close(serverSocket);
         return 1;
     }
 
     // Прослушивание порта
     if (listen(serverSocket, 5) == -1) {
-        cerr << "Listen failed" << endl;
+        perror("Listen failed");
         close(serverSocket);
         return 1;
     }
@@ -128,7 +145,7 @@ int main() {
         int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientSize);
 
         if (clientSocket == -1) {
-            cerr << "Accept failed" << endl;
+            perror("Accept failed");
             continue;
         }
 
@@ -147,11 +164,22 @@ int main() {
             bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
 
             if (bytesReceived <= 0) {
+                if (bytesReceived == -1) {
+                    perror("Receive error");
+                }
                 cout << "Client " << clientIP << ":" << ntohs(clientAddr.sin_port) << " disconnected" << endl << endl;
                 break;
             }
 
             string receivedData(buffer, bytesReceived);
+            // Удалим возможный символ перевода строки, если клиент его отправляет
+            if (!receivedData.empty() && receivedData.back() == '\n') {
+                receivedData.pop_back();
+            }
+            if (!receivedData.empty() && receivedData.back() == '\r') {
+                receivedData.pop_back();
+            }
+
             cout << "Received from " << clientIP << ":" << ntohs(clientAddr.sin_port) << " : " << receivedData << endl;
 
             if (receivedData == "exit") {
