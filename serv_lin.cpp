@@ -24,8 +24,6 @@ void printServerIPs() {
         return;
     }
 
-    выоаррыварра
-
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL) continue;
         
