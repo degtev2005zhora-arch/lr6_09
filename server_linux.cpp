@@ -9,14 +9,13 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
-#include <algorithm> // <-- обязательно для std::remove
+#include <algorithm>
+#include <cstdio> // <-- для snprintf
 
 using namespace std;
 
-// Глобальный мьютекс для защиты списка клиентов
 mutex clients_mutex;
 
-// === Вывод IP-адресов сервера ===
 void printServerIPs() {
     cout << "=== Server IP Addresses ===" << endl;
     struct ifaddrs *ifaddrs_ptr, *ifa;
@@ -37,7 +36,6 @@ void printServerIPs() {
     cout << "============================" << endl << endl;
 }
 
-// === Обработчик клиента ===
 void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& allClients) {
     {
         lock_guard<mutex> lock(clients_mutex);
@@ -48,10 +46,8 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
     char recv_buffer[1024] = {0};
     char send_buffer[1024] = {0};
 
-    // Получаем имя пользователя
     ssize_t bytes = recv(client_fd, username, sizeof(username) - 1, 0);
     if (bytes <= 0) {
-        // Не удалось получить имя — удаляем клиента
         lock_guard<mutex> lock(clients_mutex);
         allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
         close(client_fd);
@@ -63,11 +59,9 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
     int client_port = ntohs(client_addr.sin_port);
 
-    // Сообщение о подключении
-    snprintf(send_buffer, sizeof(send_buffer), "Connect %s, ip: %s:%d\n", username, client_ip, client_port);
+    snprintf(send_buffer, sizeof(send_buffer), "Connect %.19s, ip: %s:%d\n", username, client_ip, client_port);
     cout << send_buffer;
 
-    // Рассылка остальным
     {
         lock_guard<mutex> lock(clients_mutex);
         for (int fd : allClients) {
@@ -77,15 +71,13 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
         }
     }
 
-    // Основной цикл
     while (true) {
         memset(recv_buffer, 0, sizeof(recv_buffer));
         ssize_t received = recv(client_fd, recv_buffer, sizeof(recv_buffer) - 1, 0);
 
         if (received <= 0) {
-            // Клиент отключился
             cout << "Client disconnected: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
-            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %.19s\n", username);
 
             {
                 lock_guard<mutex> lock(clients_mutex);
@@ -100,12 +92,11 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
         }
 
         recv_buffer[received] = '\0';
-        // Удаляем \r\n, если есть (для клиентов с Windows)
         recv_buffer[strcspn(recv_buffer, "\r\n")] = '\0';
 
         if (strcmp(recv_buffer, "/exit") == 0) {
             cout << "Client requested exit: " << username << " (" << client_ip << ":" << client_port << ")" << endl;
-            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %s\n", username);
+            snprintf(send_buffer, sizeof(send_buffer), "Disconnect %.19s\n", username);
 
             {
                 lock_guard<mutex> lock(clients_mutex);
@@ -120,7 +111,7 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
         }
 
         cout << username << " (" << client_ip << ":" << client_port << "): " << recv_buffer << endl;
-        snprintf(send_buffer, sizeof(send_buffer), "%s: %s\n", username, recv_buffer);
+        snprintf(send_buffer, sizeof(send_buffer), "%.19s: %.1000s\n", username, recv_buffer);
 
         {
             lock_guard<mutex> lock(clients_mutex);
@@ -135,12 +126,9 @@ void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& al
     close(client_fd);
 }
 
-// === Главная функция ===
 int main() {
-    // Вывод IP-адресов сервера
     printServerIPs();
 
-    // Ввод порта с клавиатуры
     int port;
     cout << "Enter server port (1–65535): ";
     if (!(cin >> port) || port < 1 || port > 65535) {
@@ -154,7 +142,6 @@ int main() {
         return 1;
     }
 
-    // Повторное использование адреса
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
         perror("setsockopt SO_REUSEADDR");
@@ -164,7 +151,7 @@ int main() {
 
     struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);  // Слушать на всех интерфейсах
+    server_addr.sin_addr.s_addr = INADDR_ANY; // INADDR_ANY уже в сетевом порядке
     server_addr.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
@@ -194,13 +181,11 @@ int main() {
             continue;
         }
 
-        // Вывод IP и порта клиента
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
         int client_port = ntohs(client_addr.sin_port);
         cout << "New client connected: " << ip_str << ":" << client_port << endl << endl;
 
-        // Запуск обработчика в отдельном потоке
         thread t(ServerThread, client_fd, client_addr, ref(clients));
         t.detach();
     }
