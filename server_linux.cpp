@@ -9,16 +9,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
-#include <netdb.h>
-#include <cstdlib>
+#include <algorithm> // <-- обязательно для std::remove
 
 using namespace std;
 
 // Глобальный мьютекс для защиты списка клиентов
 mutex clients_mutex;
-vector<int> clients;
 
-// === Вспомогательная функция: вывод всех IPv4-адресов сервера ===
+// === Вывод IP-адресов сервера ===
 void printServerIPs() {
     cout << "=== Server IP Addresses ===" << endl;
     struct ifaddrs *ifaddrs_ptr, *ifa;
@@ -40,22 +38,22 @@ void printServerIPs() {
 }
 
 // === Обработчик клиента ===
-void ClientHandler(int client_fd, struct sockaddr_in client_addr, vector<int>& allClients) {
+void ServerThread(int client_fd, struct sockaddr_in client_addr, vector<int>& allClients) {
     {
         lock_guard<mutex> lock(clients_mutex);
         allClients.push_back(client_fd);
     }
 
     char username[20] = {0};
-    char recv_buffer[1024];
-    char send_buffer[1024];
+    char recv_buffer[1024] = {0};
+    char send_buffer[1024] = {0};
 
     // Получаем имя пользователя
     ssize_t bytes = recv(client_fd, username, sizeof(username) - 1, 0);
     if (bytes <= 0) {
         // Не удалось получить имя — удаляем клиента
         lock_guard<mutex> lock(clients_mutex);
-        allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+        allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
         close(client_fd);
         return;
     }
@@ -96,13 +94,13 @@ void ClientHandler(int client_fd, struct sockaddr_in client_addr, vector<int>& a
                         send(fd, send_buffer, strlen(send_buffer), 0);
                     }
                 }
-                allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+                allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
             }
             break;
         }
 
         recv_buffer[received] = '\0';
-        // Удаляем символы новой строки, если есть
+        // Удаляем \r\n, если есть (для клиентов с Windows)
         recv_buffer[strcspn(recv_buffer, "\r\n")] = '\0';
 
         if (strcmp(recv_buffer, "/exit") == 0) {
@@ -116,7 +114,7 @@ void ClientHandler(int client_fd, struct sockaddr_in client_addr, vector<int>& a
                         send(fd, send_buffer, strlen(send_buffer), 0);
                     }
                 }
-                allClients.erase(remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
+                allClients.erase(std::remove(allClients.begin(), allClients.end(), client_fd), allClients.end());
             }
             break;
         }
@@ -166,7 +164,7 @@ int main() {
 
     struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;  // Слушать на всех интерфейсах (локальная, глобальная, loopback)
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);  // Слушать на всех интерфейсах
     server_addr.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
@@ -181,8 +179,10 @@ int main() {
         return 1;
     }
 
-    cout << "\n✅ Server started successfully on port " << port << endl;
+    cout << "\nServer started successfully on port " << port << endl;
     cout << "Waiting for connections..." << endl << endl;
+
+    vector<int> clients;
 
     while (true) {
         struct sockaddr_in client_addr;
@@ -194,14 +194,15 @@ int main() {
             continue;
         }
 
-        // Вывод информации о клиенте
+        // Вывод IP и порта клиента
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
         int client_port = ntohs(client_addr.sin_port);
-        cout << "🆕 New client connected: " << ip_str << ":" << client_port << endl << endl;
+        cout << "New client connected: " << ip_str << ":" << client_port << endl << endl;
 
         // Запуск обработчика в отдельном потоке
-        thread(ClientHandler, client_fd, client_addr, ref(clients)).detach();
+        thread t(ServerThread, client_fd, client_addr, ref(clients));
+        t.detach();
     }
 
     close(server_fd);
